@@ -1,70 +1,123 @@
 name: Build OpenWrt
 
 on:
+  repository_dispatch:
   workflow_dispatch:
     inputs:
-      target_profile:
-        description: 'Target Profile'
-        required: true
-        default: 'Phicomm K2P'
-        type: choice
-        options:
-          - Phicomm K2P
+      ssh:
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
+
+env:
+  REPO_URL: https://mirror.ghproxy.com/https://github.com/coolsnowwolf/lede.git  # 替换为你的源码地址，已加加速
+  REPO_BRANCH: master
+  FEED_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@main
 
-      - name: Initialization environment
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo rm -rf /etc/apt/sources.list.d /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo -E apt-get -qq update
-          sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget
-          sudo -E apt-get -qq autoremove --purge
-          sudo -E apt-get -qq clean
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$USER /workdir
+        ln -sf /workdir $HOME/openwrt
 
-      - name: Clone source code
-        run: |
-          git clone https://github.com/coolsnowwolf/lede openwrt
-          cd openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> feeds.conf.default
-          ./scripts/feeds update passwall
-          ./scripts/feeds install -a -p passwall
+    - name: Clone source code
+      run: |
+        git clone --depth 1 $REPO_URL -b $REPO_BRANCH $HOME/openwrt
+        cd $HOME/openwrt
+        git submodule update --init --recursive --depth 1
 
-      - name: Generate config file
-        run: |
-          cd openwrt
-          cat > .config << EOF
-          CONFIG_TARGET_ramips=y
-          CONFIG_TARGET_ramips_mt7621=y
-          CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
-          CONFIG_PACKAGE_luci-app-passwall=y
-          CONFIG_PACKAGE_passwall=y
-          CONFIG_PACKAGE_xray-core=y
-          CONFIG_PACKAGE_shadowsocks-libev=y
-          CONFIG_PACKAGE_chinadns-ng=y
-          EOF
-          make defconfig
+    - name: Update feeds
+      run: |
+        cd $HOME/openwrt
+        sed -i 's@https://git.openwrt.org/feed/@https://mirror.ghproxy.com/https://git.openwrt.org/feed/@g' $FEED_CONF
+        sed -i 's@https://github.com/@https://mirror.ghproxy.com/https://github.com/@g' $FEED_CONF
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
-      - name: Download packages
-        run: |
-          cd openwrt
-          make download -j$(nproc) V=s
+    - name: Generate config file
+      run: |
+        cd $HOME/openwrt
+        [ -e $CONFIG_FILE ] && cat $CONFIG_FILE >> .config
+        # 这里可以添加你的默认配置，比如 K2P 的配置
+        cat >> .config <<EOF
+        CONFIG_TARGET_ramips=y
+        CONFIG_TARGET_ramips_mt7621=y
+        CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
+        CONFIG_PACKAGE_luci-app-passwall=y
+        EOF
+        make defconfig
 
-      - name: Compile firmware
-        run: |
-          cd openwrt
-          make -j$(nproc) V=s
+    - name: Download packages
+      run: |
+        cd $HOME/openwrt
+        make download -j$(nproc)
+        find dl -size -1024c -exec rm -f {} \;
 
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: Firmware
-          path: openwrt/bin/targets/ramips/mt7621/*.bin
+    - name: Compile firmware
+      run: |
+        cd $HOME/openwrt
+        make -j$(nproc) || make -j1 V=s
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin_${{ env.REPO_BRANCH }}
+        path: openwrt/bin
+
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd $HOME/openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware_${{ env.REPO_BRANCH }}
+        path: ${{ env.FIRMWARE }}
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "🔔 编译完成，固件已上传" >> release.txt
+
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@master
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
