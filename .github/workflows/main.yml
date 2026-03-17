@@ -10,7 +10,8 @@ on:
         default: 'false'
 
 env:
-  REPO_URL: https://mirror.ghproxy.com/https://github.com/coolsnowwolf/lede.git  # 替换为你的源码地址，已加加速
+  # 使用 Gitee 镜像的 Lede 源码地址（最稳定）
+  REPO_URL: https://gitee.com/lede-project/lede.git
   REPO_BRANCH: master
   FEED_CONF: feeds.conf.default
   CONFIG_FILE: .config
@@ -45,6 +46,7 @@ jobs:
 
     - name: Clone source code
       run: |
+        # 克隆 Gitee 镜像源码，仅拉取最新提交（加速）
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH $HOME/openwrt
         cd $HOME/openwrt
         git submodule update --init --recursive --depth 1
@@ -52,8 +54,9 @@ jobs:
     - name: Update feeds
       run: |
         cd $HOME/openwrt
-        sed -i 's@https://git.openwrt.org/feed/@https://mirror.ghproxy.com/https://git.openwrt.org/feed/@g' $FEED_CONF
-        sed -i 's@https://github.com/@https://mirror.ghproxy.com/https://github.com/@g' $FEED_CONF
+        # 将 feeds 源替换为 Gitee 镜像
+        sed -i 's@https://git.openwrt.org/feed/@https://gitee.com/openwrt-immortalwrt/feed_@g' $FEED_CONF
+        sed -i 's@https://github.com/@https://gitee.com/@g' $FEED_CONF
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
@@ -61,12 +64,13 @@ jobs:
       run: |
         cd $HOME/openwrt
         [ -e $CONFIG_FILE ] && cat $CONFIG_FILE >> .config
-        # 这里可以添加你的默认配置，比如 K2P 的配置
+        # 内置 K2P + Passwall 配置（可根据需要修改）
         cat >> .config <<EOF
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
         CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
         CONFIG_PACKAGE_luci-app-passwall=y
+        CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
         EOF
         make defconfig
 
