@@ -10,8 +10,8 @@ on:
         default: 'false'
 
 env:
-  # 使用 Gitee 镜像的 Lede 源码地址（最稳定）
-  REPO_URL: https://gitee.com/lede-project/lede.git
+  # 改用 GitHub 原始地址，避免 Gitee 认证问题
+  REPO_URL: https://github.com/coolsnowwolf/lede.git
   REPO_BRANCH: master
   FEED_CONF: feeds.conf.default
   CONFIG_FILE: .config
@@ -46,17 +46,16 @@ jobs:
 
     - name: Clone source code
       run: |
-        # 克隆 Gitee 镜像源码，仅拉取最新提交（加速）
+        # 克隆 GitHub 源码，仅拉取最新提交（加速+避免认证）
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH $HOME/openwrt
         cd $HOME/openwrt
-        git submodule update --init --recursive --depth 1
+        # 暂时不更新子模块，先跑通克隆
+        # git submodule update --init --recursive --depth 1
 
     - name: Update feeds
       run: |
         cd $HOME/openwrt
-        # 将 feeds 源替换为 Gitee 镜像
-        sed -i 's@https://git.openwrt.org/feed/@https://gitee.com/openwrt-immortalwrt/feed_@g' $FEED_CONF
-        sed -i 's@https://github.com/@https://gitee.com/@g' $FEED_CONF
+        # 用 GitHub 官方源，避免 Gitee 替换错误
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
@@ -64,13 +63,12 @@ jobs:
       run: |
         cd $HOME/openwrt
         [ -e $CONFIG_FILE ] && cat $CONFIG_FILE >> .config
-        # 内置 K2P + Passwall 配置（可根据需要修改）
+        # K2P + Passwall 基础配置
         cat >> .config <<EOF
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
         CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
         CONFIG_PACKAGE_luci-app-passwall=y
-        CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
         EOF
         make defconfig
 
@@ -85,21 +83,21 @@ jobs:
         cd $HOME/openwrt
         make -j$(nproc) || make -j1 V=s
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin_${{ env.REPO_BRANCH }}
-        path: openwrt/bin
-
     - name: Organize files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
       run: |
-        cd $HOME/openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+        # 先判断目录是否存在，避免直接报错
+        if [ -d "$HOME/openwrt/bin/targets" ]; then
+          cd $HOME/openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+        else
+          echo "::error::编译产物目录不存在，编译可能失败"
+          echo "status=failure" >> $GITHUB_OUTPUT
+          exit 1
+        fi
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@main
