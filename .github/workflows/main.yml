@@ -1,4 +1,4 @@
-name: Build OpenWrt for K2P A2 (Passwall Slim)
+name: Build K2P A2 Passwall (Slim)
 
 on:
   workflow_dispatch:
@@ -6,9 +6,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # 1. 全局强制 Node.js 24，彻底消除警告
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      DEBIAN_FRONTEND: noninteractive
+      DEBIAN_FRONTEND: noninteractive  # 避免apt弹窗卡住
+      TZ: Asia/Shanghai  # 时区统一，避免编译时间异常
     defaults:
       run:
         shell: bash
@@ -16,41 +18,53 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+      # 步骤级再次强制 Node.js 24，双重保障
       env:
         FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-    - name: 初始化编译环境
+    - name: 1. 初始化编译环境（补全所有依赖）
       run: |
+        # 换阿里云源，解决网络慢/下载失败
         sudo sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
         sudo apt update -o Acquire::Retries=10 -y
+        # 安装OpenWrt编译必需的完整依赖（无遗漏）
         sudo apt install -y build-essential clang flex bison g++ gawk \
         gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-        python3-distutils rsync unzip zlib1g-dev file wget autopoint libtool-bin pkg-config
+        python3 python3-distutils rsync unzip zlib1g-dev file wget \
+        autopoint libtool-bin pkg-config curl ca-certificates
         sudo apt clean
+        # 清理磁盘空间（避免空间不足）
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
 
-    - name: 克隆 ImmortalWrt 源码
+    - name: 2. 克隆 ImmortalWrt 源码（稳定分支）
       run: |
         git clone --depth=1 --branch openwrt-23.05 https://github.com/immortalwrt/immortalwrt.git openwrt
         cd openwrt
+        # 校验源码是否克隆成功
         if [ ! -f "Makefile" ]; then
           echo "❌ 源码克隆失败！"
           exit 1
         fi
 
-    - name: 更新并安装 Feeds (修复版)
+    - name: 3. 安装 Passwall Feeds（修复核心逻辑）
       run: |
         cd openwrt
-        # 1. 彻底清理所有旧的 feeds 缓存和索引
-        rm -rf feeds/ tmp/ .config feeds.conf.default
-        # 2. 重新添加 Passwall 源
-        echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git" >> feeds.conf.default
-        # 3. 强制更新并安装，确保 Passwall 被正确拉取
-        ./scripts/feeds update -f -a
-        ./scripts/feeds install -f -a
-        # 4. 验证是否安装成功
-        ls -la feeds/ | grep passwall
+        # 安全清理：只删存在的缓存，不报错
+        [ -d "feeds/passwall" ] && rm -rf feeds/passwall
+        [ -f "feeds.conf.default" ] || cp feeds.conf.default.example feeds.conf.default
+        # 添加 Passwall 源（用镜像加速，避免下载失败）
+        echo "src-git passwall https://mirror.ghproxy.com/https://github.com/xiaorouji/openwrt-passwall.git" >> feeds.conf.default
+        # 强制更新+安装，失败自动重试
+        ./scripts/feeds clean
+        ./scripts/feeds update -a -f || ./scripts/feeds update -a -f
+        ./scripts/feeds install -a -f || ./scripts/feeds install -a -f
+        # 校验 Passwall 是否安装成功
+        if [ ! -d "feeds/passwall" ]; then
+          echo "❌ Passwall Feeds 安装失败！"
+          exit 1
+        fi
 
-    - name: 加载 K2P 精简配置
+    - name: 4. 配置 K2P 精简固件（适配16MB闪存）
       run: |
         cd openwrt
         cat > .config << 'EOF'
@@ -58,49 +72,51 @@ jobs:
         CONFIG_TARGET_ramips_mt7621=y
         CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
 
+        # 基础LuCI（中文）
         CONFIG_PACKAGE_luci=y
         CONFIG_LUCI_LANG_zh_Hans=y
 
-        # 核心修复：强制启用完整的 Xray 依赖
+        # Passwall 核心（必选，解决VLESS/Xray问题）
         CONFIG_PACKAGE_luci-app-passwall=y
         CONFIG_PACKAGE_xray-core=y
         CONFIG_PACKAGE_xray-geodata=y
         CONFIG_PACKAGE_v2ray-geodata=y
 
-        # 必要依赖库
+        # 必要依赖（缺一不可）
         CONFIG_PACKAGE_dnsmasq=y
         CONFIG_PACKAGE_ca-bundle=y
         CONFIG_PACKAGE_curl=y
         CONFIG_PACKAGE_libstdcpp=y
         CONFIG_PACKAGE_zlib=y
 
-        # 精简配置：关闭无用功能以减小体积
+        # 极致精简（控制固件<16MB）
         CONFIG_PACKAGE_ipv6helper=n
         CONFIG_PACKAGE_ip6tables=n
         CONFIG_PACKAGE_ppp=n
         CONFIG_PACKAGE_ppp-mod-pppoe=n
         CONFIG_PACKAGE_firewall4=n
+        CONFIG_PACKAGE_wpad-mesh-openssl=n
+        CONFIG_PACKAGE_wpad-basic-wolfssl=y
 
-        # 使用 iptables 兼容 Passwall
+        # Passwall 兼容（iptables）
         CONFIG_PACKAGE_firewall=y
         CONFIG_PACKAGE_iptables=y
         CONFIG_PACKAGE_iptables-mod-tproxy=y
         EOF
         make defconfig
-        # 验证配置生成
-        ls -la .config
 
-    - name: 下载编译依赖包
+    - name: 5. 下载依赖包（失败重试）
       run: |
         cd openwrt
         make download -j$(nproc) || make download -j1 V=s
 
-    - name: 编译固件 (单线程稳定编译)
+    - name: 6. 编译固件（单线程稳定版）
       run: |
         cd openwrt
+        # 单线程编译，避免内存溢出（GitHub Runner内存有限）
         make -j1 V=s 2>&1 | tee compile.log
 
-    - name: 上传编译日志
+    - name: 7. 上传编译日志（用于排查）
       uses: actions/upload-artifact@v4
       env:
         FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -109,11 +125,11 @@ jobs:
         path: openwrt/compile.log
         if-no-files-found: warn
 
-    - name: 上传固件产物
+    - name: 8. 上传固件（最终产物）
       uses: actions/upload-artifact@v4
       env:
         FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       with:
         name: K2P-A2-Passwall-Slim
-        path: openwrt/bin/targets/**/*
+        path: openwrt/bin/targets/**/*.bin
         if-no-files-found: ignore
