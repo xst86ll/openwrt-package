@@ -1,4 +1,4 @@
-name: K2P A2 100% Stable Build
+name: Build OpenWrt for K2P A2 (Passwall Slim)
 
 on:
   workflow_dispatch:
@@ -6,103 +6,110 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      DEBIAN_FRONTEND: noninteractive
+    defaults:
+      run:
+        shell: bash
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
+      env:
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-      # 🧠 清理磁盘（关键）
-      - name: Free Disk Space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/lib/android
-          df -h
+    - name: 初始化编译环境
+      run: |
+        sudo sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+        sudo apt update -o Acquire::Retries=10 -y
+        sudo apt install -y build-essential clang flex bison g++ gawk \
+        gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+        python3-distutils rsync unzip zlib1g-dev file wget autopoint libtool-bin pkg-config
+        sudo apt clean
 
-      # 🧠 防炸内存
-- name: Setup Swap (Safe)
-  run: |
-    sudo swapoff -a || true
-    sudo rm -f /swapfile
+    - name: 克隆 ImmortalWrt 源码
+      run: |
+        git clone --depth=1 --branch openwrt-23.05 https://github.com/immortalwrt/immortalwrt.git openwrt
+        cd openwrt
+        if [ ! -f "Makefile" ]; then
+          echo "❌ 源码克隆失败！"
+          exit 1
+        fi
 
-    sudo fallocate -l 4G /swapfile
-    sudo chmod 600 /swapfile
-    sudo mkswap /swapfile
-    sudo swapon /swapfile
+    - name: 更新并安装 Feeds（Passwall）
+      run: |
+        cd openwrt
+        # 先清理所有 feeds 缓存，避免旧数据干扰
+        ./scripts/feeds clean
+        # 添加 Passwall 源
+        echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git" >> feeds.conf.default
+        # 强制更新并安装
+        ./scripts/feeds update -a -f || ./scripts/feeds update -a -f
+        ./scripts/feeds install -a -f || ./scripts/feeds install -a -f
 
-    free -h
+    - name: 加载 K2P 精简配置
+      run: |
+        cd openwrt
+        cat > .config << 'EOF'
+        CONFIG_TARGET_ramips=y
+        CONFIG_TARGET_ramips_mt7621=y
+        CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
 
-- name: Install Dependencies
-  run: |
-    sudo apt update -y
-    sudo apt install -y build-essential clang flex bison g++ gawk \
-    gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-    python3-distutils rsync unzip zlib1g-dev file wget curl \
-    autopoint libtool-bin pkg-config
+        CONFIG_PACKAGE_luci=y
+        CONFIG_LUCI_LANG_zh_Hans=y
 
-      # 📥 固定版本源码（关键稳定点）
-      - name: Clone Source
-        run: |
-          git clone --depth=1 --branch v23.05.3 https://github.com/immortalwrt/immortalwrt.git openwrt
-          cd openwrt
-          echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git" >> feeds.conf.default
+        # Passwall 核心
+        CONFIG_PACKAGE_luci-app-passwall=y
+        CONFIG_PACKAGE_xray-core=y
+        CONFIG_PACKAGE_xray-geodata=y
+        CONFIG_PACKAGE_v2ray-geodata=y
 
-      # 🔄 feeds
-      - name: Update Feeds
-        run: |
-          cd openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+        # 必要依赖
+        CONFIG_PACKAGE_dnsmasq=y
+        CONFIG_PACKAGE_ca-bundle=y
+        CONFIG_PACKAGE_curl=y
+        CONFIG_PACKAGE_libstdcpp=y
+        CONFIG_PACKAGE_zlib=y
 
-      # ⚙️ 极简稳定配置（不会炸）
-      - name: Generate Config
-        run: |
-          cd openwrt
-          cat > .config << 'EOF'
-          CONFIG_TARGET_ramips=y
-          CONFIG_TARGET_ramips_mt7621=y
-          CONFIG_TARGET_ramips_mt7621_DEVICE_phicomm_k2p=y
+        # 精简配置
+        CONFIG_PACKAGE_ipv6helper=n
+        CONFIG_PACKAGE_ip6tables=n
+        CONFIG_PACKAGE_ppp=n
+        CONFIG_PACKAGE_ppp-mod-pppoe=n
+        CONFIG_PACKAGE_firewall4=n
 
-          CONFIG_PACKAGE_luci=y
-          CONFIG_LUCI_LANG_zh_Hans=y
+        # iptables 兼容
+        CONFIG_PACKAGE_firewall=y
+        CONFIG_PACKAGE_iptables=y
+        CONFIG_PACKAGE_iptables-mod-tproxy=y
+        EOF
+        make defconfig
 
-          # 只装 Passwall UI（核心不编译）
-          CONFIG_PACKAGE_luci-app-passwall=y
+    - name: 下载编译依赖包
+      run: |
+        cd openwrt
+        make download -j$(nproc) || make download -j1 V=s
 
-          CONFIG_PACKAGE_dnsmasq=y
-          CONFIG_PACKAGE_ca-bundle=y
-          CONFIG_PACKAGE_curl=y
+    - name: 编译固件
+      run: |
+        cd openwrt
+        make -j1 V=s 2>&1 | tee compile.log
 
-          # 精简
-          CONFIG_PACKAGE_ipv6helper=n
-          CONFIG_PACKAGE_ip6tables=n
-          CONFIG_PACKAGE_ppp=n
-          CONFIG_PACKAGE_ppp-mod-pppoe=n
-          CONFIG_PACKAGE_firewall4=n
-          CONFIG_PACKAGE_firewall=y
-          CONFIG_PACKAGE_iptables=y
-          EOF
+    - name: 上传编译日志
+      uses: actions/upload-artifact@v4
+      env:
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      with:
+        name: compile-log
+        path: openwrt/compile.log
+        if-no-files-found: warn
 
-          make defconfig
-
-      # 📥 下载（3次重试）
-      - name: Download
-        run: |
-          cd openwrt
-          make download -j8 || make download -j1 V=s || make download -j1 V=s
-
-      # 🔨 编译（双保险）
-      - name: Compile
-        run: |
-          cd openwrt
-          make -j1 V=s || make -j1 V=s
-
-      # 📦 输出
-      - name: Upload Firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: K2P-A2-100-Stable
-          path: openwrt/bin/targets/**/*
+    - name: 上传固件产物
+      uses: actions/upload-artifact@v4
+      env:
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      with:
+        name: K2P-A2-Passwall-Slim
+        path: openwrt/bin/targets/**/*
+        if-no-files-found: ignore
