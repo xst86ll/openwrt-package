@@ -29,15 +29,12 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
-    # 失败重试机制：最多重试2次
+    # 保留 strategy 但移除不兼容的 retry
     strategy:
       fail-fast: false
       matrix:
         include:
           - runs-on: ubuntu-22.04
-    retry:
-      max_attempts: 2
-      delay_seconds: 300
 
     steps:
     - name: Checkout
@@ -50,7 +47,7 @@ jobs:
         DEBIAN_FRONTEND: noninteractive
       run: |
         # 换国内源加速依赖安装
-        sudo sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+        sudo sed -i 's#archive.ubuntu.com#mirrors.aliyun.com#g' /etc/apt/sources.list
         sudo rm -rf /etc/apt/sources.list.d/*
         sudo apt update -y && sudo apt upgrade -y
         # 安装完整编译依赖（补全易缺失组件）
