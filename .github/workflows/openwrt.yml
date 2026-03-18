@@ -23,12 +23,17 @@ jobs:
           df -h
 
       # 🧠 防炸内存
-      - name: Setup Swap
-        run: |
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+      - name: Setup Swap (Safe)
+  run: |
+    sudo swapoff -a || true
+    sudo rm -f /swapfile
+
+    sudo fallocate -l 4G /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+
+    free -h
 
       # 📦 依赖
       - name: Install Dependencies
