@@ -1,4 +1,4 @@
-name: Build OpenWrt (Final Fix)
+name: Build OpenWrt (Passwall Gitee Fix)
 
 on:
   repository_dispatch:
@@ -16,7 +16,7 @@ env:
   CONFIG_FILE: .config
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
-  UPLOAD_RELEASE: false  # 临时关闭 Release 上传，避免权限问题
+  UPLOAD_RELEASE: false
   TZ: Asia/Shanghai
   TARGET_ARCH: ramips/mt7621
   DEVICE_NAME: phicomm_k2p
@@ -68,21 +68,22 @@ jobs:
         cd $HOME/openwrt
         git submodule update --init --recursive --depth=1 2>/dev/null || true
 
-    - name: Update Feeds (移除 ghproxy)
+    - name: Update Feeds
       run: |
         cd $HOME/openwrt
-        # 直接用原始 GitHub 源，不走 ghproxy
         ./scripts/feeds update -a || ./scripts/feeds update -a -f
         ./scripts/feeds install -a
 
-    - name: Add Passwall & VLESS Dependencies
+    - name: Add Passwall & VLESS Dependencies (Gitee 镜像)
       run: |
         cd $HOME/openwrt
-        echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> $FEED_CONF
-        echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git;main" >> $FEED_CONF
-        ./scripts/feeds update passwall passwall_packages
-        ./scripts/feeds install -a -p passwall
-        ./scripts/feeds install -a -p passwall_packages
+        # 改用 Gitee 镜像源，避免 GitHub 访问问题
+        echo "src-git passwall_packages https://gitee.com/xiaorouji/openwrt-passwall-packages.git;main" >> $FEED_CONF
+        echo "src-git passwall https://gitee.com/xiaorouji/openwrt-passwall.git;main" >> $FEED_CONF
+        # 容错：更新失败不阻断流程
+        ./scripts/feeds update passwall passwall_packages || true
+        ./scripts/feeds install -a -p passwall || true
+        ./scripts/feeds install -a -p passwall_packages || true
 
     - name: Generate Config (K2P + VLESS)
       run: |
@@ -123,7 +124,7 @@ jobs:
         else
           echo "::error::编译产物目录不存在，编译失败"
           echo "status=failure" >> $GITHUB_OUTPUT
-          exit 0  # 不阻断后续步骤
+          exit 0
         fi
 
     - name: Upload Firmware
